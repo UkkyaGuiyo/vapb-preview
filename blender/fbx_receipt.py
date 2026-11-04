@@ -1,0 +1,678 @@
+"""Source-side FBX identity and Blender realization receipts.
+
+The receipt deliberately stops at the boundary that the source FBX and the
+official Blender importer can prove: FBX Model UID -> Geometry UID -> the
+Object created during this import.  Unity local file IDs are not inferred.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import inspect
+import json
+import math
+import struct
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+
+RECEIPT_VERSION = "vapb_fbx_realization_receipt_v1"
+
+
+def _shape_fingerprint(key, basis=None):
+    if basis is not None and len(key.data) != len(basis.data):
+        raise ValueError('MISSING_KEYBLOCK')
+    if (len(key.data) and getattr(getattr(key, 'bl_rna', None), 'identifier', None) == 'ShapeKey'
+            and (basis is None or getattr(getattr(basis, 'bl_rna', None), 'identifier', None) == 'ShapeKey')):
+        import numpy as np
+
+        # Native coordinates are float32; Python's previous scalar subtraction
+        # used float64 before packing little-endian float32. Preserve that order.
+        coordinates = np.empty(len(key.data) * 3, dtype=np.float32)
+        key.data.foreach_get('co', coordinates)
+        if basis is not None:
+            origin = np.empty_like(coordinates)
+            basis.data.foreach_get('co', origin)
+            with np.errstate(over='ignore', invalid='ignore'):
+                coordinates = np.subtract(coordinates, origin, dtype=np.float64).astype('<f4')
+        else:
+            coordinates = coordinates.astype('<f4', copy=False)
+        if np.isfinite(coordinates).all():
+            return hashlib.sha256(memoryview(coordinates).cast('B')).hexdigest()
+        # Preserve scalar exception type/order for NaN, Inf and float32 overflow.
+    values = bytearray()
+    for index, point in enumerate(key.data):
+        xyz = [float(point.co[axis]) - (float(basis.data[index].co[axis]) if basis else 0)
+               for axis in range(3)]
+        if not all(math.isfinite(value) for value in xyz):
+            raise ValueError('CHANNEL_IDENTITY_UNPROVEN')
+        values.extend(struct.pack('<3f', *xyz))
+    return hashlib.sha256(values).hexdigest()
+
+
+def persist_shape_receipts(mesh, sha256, geometry_uid, captures):
+    """Bind the official importer's returned channel UID to its actual KeyBlock.
+
+    KeyBlocks do not support ID properties. Store import-captured handles as
+    Key-local indices with immutable delta/basis corroboration; labels are absent.
+    A reorder/edit invalidates this import proof rather than rebinding by search.
+    """
+    keys = mesh.shape_keys
+    blocks = list(keys.key_blocks)
+    if len(captures) != len(blocks) - 1:
+        raise ValueError('CHANNEL_IDENTITY_UNPROVEN')
+    rows = []
+    for channel_uid, shape_uid, key in captures:
+        index = blocks.index(key)
+        if index == 0 or key.relative_key != blocks[0]:
+            raise ValueError('CHANNEL_IDENTITY_UNPROVEN')
+        rows.append(dict(channel_uid=int(channel_uid), shape_uid=int(shape_uid), key_index=index,
+                         delta_sha256=_shape_fingerprint(key, blocks[0])))
+    if len({row['channel_uid'] for row in rows}) != len(rows) or len({row['key_index'] for row in rows}) != len(rows):
+        raise ValueError('CHANNEL_IDENTITY_UNPROVEN')
+    table = dict(schema='vapb-fbx-shape-receipt-1', fbx_sha256=sha256,
+                 geometry_uid=int(geometry_uid), basis_sha256=_shape_fingerprint(blocks[0]), channels=rows)
+    payload = json.dumps(table, sort_keys=True)
+    keys['_vapb_fbx_shape_receipts'] = payload
+    keys['_vapb_fbx_shape_receipt_sha256'] = hashlib.sha256(payload.encode()).hexdigest()
+
+
+def validate_shape_receipts(mesh, sha256, geometry_uid):
+    """Return receipt-selected KeyBlocks or reject; never rematch edited keys."""
+    keys = getattr(mesh, 'shape_keys', None)
+    try:
+        payload = keys['_vapb_fbx_shape_receipts']
+        if hashlib.sha256(payload.encode()).hexdigest() != keys['_vapb_fbx_shape_receipt_sha256']:
+            raise ValueError('CHANNEL_IDENTITY_UNPROVEN')
+        table = json.loads(payload)
+        if (table['schema'] != 'vapb-fbx-shape-receipt-1' or table['fbx_sha256'] != sha256
+                or table['geometry_uid'] != int(geometry_uid)):
+            raise ValueError('CHANNEL_IDENTITY_UNPROVEN')
+        blocks = list(keys.key_blocks)
+        rows = table['channels']
+        if len(blocks) != len(rows) + 1 or _shape_fingerprint(blocks[0]) != table['basis_sha256']:
+            raise ValueError('MISSING_KEYBLOCK')
+        mapped = {}
+        used = set()
+        for row in rows:
+            uid, index = row['channel_uid'], row['key_index']
+            if (type(uid) is not int or not uid or uid in mapped or type(index) is not int
+                    or index <= 0 or index >= len(blocks) or index in used):
+                raise ValueError('CHANNEL_IDENTITY_UNPROVEN')
+            key = blocks[index]
+            if key.relative_key != blocks[0] or _shape_fingerprint(key, blocks[0]) != row['delta_sha256']:
+                raise ValueError('CHANNEL_IDENTITY_UNPROVEN')
+            mapped[uid] = key
+            used.add(index)
+        return mapped
+    except (KeyError, TypeError, AttributeError, IndexError) as exc:
+        raise ValueError('CHANNEL_IDENTITY_UNPROVEN') from exc
+
+
+def _uid(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass(frozen=True)
+class FbxModelLink:
+    model_uid: int
+    geometry_uid: int
+
+
+class RawFbxSemanticIndex:
+    """The minimal raw-FBX graph needed for realization provenance."""
+
+    def __init__(self, links: list[FbxModelLink], model_uids: list[int] | None = None):
+        self.links = tuple(links)
+        self._model_uid_counts: dict[int, int] = {}
+        for uid in model_uids or []:
+            self._model_uid_counts[uid] = self._model_uid_counts.get(uid, 0) + 1
+        by_model: dict[int, list[int]] = {}
+        for link in links:
+            by_model.setdefault(link.model_uid, []).append(link.geometry_uid)
+        self._by_model = {key: tuple(value) for key, value in by_model.items()}
+
+    def geometry_for_model(self, model_uid: int) -> int | None:
+        values = self._by_model.get(int(model_uid), ())
+        return values[0] if len(values) == 1 else None
+
+    def unique_source_model(self, model_uid: int) -> bool:
+        return self._model_uid_counts.get(model_uid) == 1
+
+    @classmethod
+    def from_file(cls, path: Path) -> "RawFbxSemanticIndex":
+        # Blender ships and uses this parser for its official FBX importer.
+        # Import it only inside Blender; the pure data model remains testable
+        # without a Blender installation.
+        from io_scene_fbx.parse_fbx import parse  # type: ignore
+
+        root, _version = parse(str(path), use_namedtuple=True)
+        objects = next((item for item in root.elems if item.id == b"Objects"), None)
+        connections = next((item for item in root.elems if item.id == b"Connections"), None)
+        if objects is None or connections is None:
+            return cls([])
+        model_uids = [
+            _uid(item.props[0])
+            for item in objects.elems
+            if item.id == b"Model" and item.props and _uid(item.props[0]) is not None
+        ]
+        models = set(model_uids)
+        geometries = {
+            _uid(item.props[0])
+            for item in objects.elems
+            if item.id == b"Geometry"
+            and len(item.props) > 2
+            and item.props[2] == b"Mesh"
+            and _uid(item.props[0]) is not None
+        }
+        links: list[FbxModelLink] = []
+        for item in connections.elems:
+            if item.id != b"C" or len(item.props) < 3 or item.props[0] != b"OO":
+                continue
+            source = _uid(item.props[1])
+            destination = _uid(item.props[2])
+            if source in geometries and destination in models:
+                links.append(FbxModelLink(destination, source))
+        return cls(links, model_uids)
+
+
+@dataclass(frozen=True)
+class FbxImportReceipt:
+    source_asset_guid: str
+    source_asset_sha256: str
+    fbx_model_uid: int
+    fbx_geometry_uid: int
+    blender_object_receipt_id: str
+    blender_mesh_receipt_id: str
+    evidence: str = "OFFICIAL_IMPORTER_MODEL_HOOK"
+
+
+@dataclass(frozen=True)
+class FbxBoneReceipt:
+    source_asset_guid: str
+    source_asset_sha256: str
+    fbx_model_uid: int
+    blender_bone_receipt_id: str
+    evidence: str = "OFFICIAL_IMPORTER_BUILD_SKELETON_RETURN"
+
+
+def source_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def make_receipt(model_uid: int, geometry_uid: int, source_asset_guid: str, sha256: str) -> FbxImportReceipt:
+    prefix = f"{sha256}:{model_uid}:{geometry_uid}"
+    return FbxImportReceipt(
+        source_asset_guid=source_asset_guid.lower(),
+        source_asset_sha256=sha256,
+        fbx_model_uid=model_uid,
+        fbx_geometry_uid=geometry_uid,
+        blender_object_receipt_id=f"vapb-fbx-object:{hashlib.sha256(prefix.encode()).hexdigest()}",
+        blender_mesh_receipt_id=f"vapb-fbx-mesh:{hashlib.sha256(f'{sha256}:{geometry_uid}'.encode()).hexdigest()}",
+    )
+
+
+def make_transform_receipt(model_uid: int, source_asset_guid: str, sha256: str) -> FbxImportReceipt:
+    """An Object-only receipt; zero denotes absence of Geometry, never a mesh UID."""
+    receipt = make_receipt(model_uid, 0, source_asset_guid, sha256)
+    return FbxImportReceipt(receipt.source_asset_guid, sha256, model_uid, 0,
+                            receipt.blender_object_receipt_id, '')
+
+
+def validate_persistent_transform_receipt(obj: Any) -> bool:
+    try:
+        if obj.type != 'ARMATURE' or obj.get('_vapb_fbx_receipt_version') != RECEIPT_VERSION:
+            return False
+        guid = obj.get('_vapb_fbx_source_asset_guid', '')
+        sha = obj.get('_vapb_fbx_source_asset_sha256', '')
+        uid = int(obj.get('_vapb_fbx_model_uid', ''))
+        import re
+        if (not re.fullmatch('[0-9a-f]{32}', guid) or not re.fullmatch('[0-9a-f]{64}', sha)
+                or not uid or not -(2**63) <= uid < 2**63
+                or str(uid) != obj.get('_vapb_fbx_model_uid')
+                or not obj.get('_vapb_fbx_realization_id')
+                or '_vapb_fbx_geometry_uid' in obj or '_vapb_fbx_mesh_receipt_id' in obj):
+            return False
+        return obj.get('_vapb_fbx_object_receipt_id') == make_transform_receipt(uid, guid, sha).blender_object_receipt_id
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def persist_receipt(obj: Any, receipt: FbxImportReceipt) -> None:
+    """Persist only semantic, hash-bound values; never a runtime pointer."""
+    values = {
+        "_vapb_fbx_receipt_version": RECEIPT_VERSION,
+        "_vapb_fbx_source_asset_guid": receipt.source_asset_guid,
+        "_vapb_fbx_source_asset_sha256": receipt.source_asset_sha256,
+        "_vapb_fbx_model_uid": str(receipt.fbx_model_uid),
+        "_vapb_fbx_geometry_uid": str(receipt.fbx_geometry_uid),
+        "_vapb_fbx_object_receipt_id": receipt.blender_object_receipt_id,
+        "_vapb_fbx_mesh_receipt_id": receipt.blender_mesh_receipt_id,
+        "_vapb_fbx_receipt_evidence": receipt.evidence,
+        "_vapb_fbx_realization_id": str(uuid.uuid4()),
+    }
+    if receipt.fbx_geometry_uid == 0:
+        values.pop('_vapb_fbx_geometry_uid')
+        values.pop('_vapb_fbx_mesh_receipt_id')
+    for key, value in values.items():
+        obj[key] = value
+    data = getattr(obj, "data", None) if receipt.fbx_geometry_uid else None
+    object_session_uid = getattr(obj, "session_uid", None)
+    if object_session_uid is not None:
+        obj["_vapb_fbx_object_session_uid"] = str(object_session_uid)
+    if data is not None:
+        data["_vapb_fbx_receipt_version"] = RECEIPT_VERSION
+        data["_vapb_fbx_source_asset_sha256"] = receipt.source_asset_sha256
+        data["_vapb_fbx_geometry_uid"] = str(receipt.fbx_geometry_uid)
+        data["_vapb_fbx_mesh_receipt_id"] = receipt.blender_mesh_receipt_id
+        mesh_session_uid = getattr(data, "session_uid", None)
+        if mesh_session_uid is not None:
+            data["_vapb_fbx_mesh_session_uid"] = str(mesh_session_uid)
+
+
+def validate_receipt_continuity(obj: Any) -> bool:
+    """Check same-session continuity, not persistent identity after reopening."""
+    stored_object = obj.get("_vapb_fbx_object_session_uid")
+    data = getattr(obj, "data", None)
+    stored_mesh = data.get("_vapb_fbx_mesh_session_uid") if data is not None else None
+    current_object = getattr(obj, "session_uid", None)
+    current_mesh = getattr(data, "session_uid", None) if data is not None else None
+    return (
+        stored_object is not None
+        and stored_mesh is not None
+        and current_object is not None
+        and current_mesh is not None
+        and str(current_object) == str(stored_object)
+        and str(current_mesh) == str(stored_mesh)
+    )
+
+
+def validate_persistent_receipt(obj: Any) -> bool:
+    """Validate the saved FBX-to-Object/Mesh receipt without session UIDs."""
+    data = getattr(obj, "data", None)
+    try:
+        if getattr(obj, "type", None) != "MESH" or data is None:
+            return False
+        if obj.get("_vapb_fbx_receipt_version") != RECEIPT_VERSION:
+            return False
+        guid = str(obj.get("_vapb_fbx_source_asset_guid", "")).lower()
+        sha256 = str(obj.get("_vapb_fbx_source_asset_sha256", "")).lower()
+        model_uid = int(obj.get("_vapb_fbx_model_uid", ""))
+        geometry_uid = int(obj.get("_vapb_fbx_geometry_uid", ""))
+        if not guid or not sha256 or not obj.get("_vapb_fbx_realization_id"):
+            return False
+        receipt = make_receipt(model_uid, geometry_uid, guid, sha256)
+        return (
+            obj.get("_vapb_fbx_object_receipt_id") == receipt.blender_object_receipt_id
+            and obj.get("_vapb_fbx_mesh_receipt_id") == receipt.blender_mesh_receipt_id
+            and data.get("_vapb_fbx_receipt_version") == RECEIPT_VERSION
+            and str(data.get("_vapb_fbx_source_asset_sha256", "")).lower() == sha256
+            and str(data.get("_vapb_fbx_geometry_uid", "")) == str(geometry_uid)
+            and data.get("_vapb_fbx_mesh_receipt_id") == receipt.blender_mesh_receipt_id
+        )
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return False
+
+
+def make_bone_receipt(model_uid: int, source_asset_guid: str, sha256: str) -> FbxBoneReceipt:
+    source_asset_guid = source_asset_guid.lower()
+    return FbxBoneReceipt(
+        source_asset_guid=source_asset_guid,
+        source_asset_sha256=sha256,
+        fbx_model_uid=model_uid,
+        blender_bone_receipt_id=f"vapb-fbx-bone:{hashlib.sha256(f'{source_asset_guid}:{sha256}:{model_uid}'.encode()).hexdigest()}",
+    )
+
+
+def persist_bone_receipt(bone: Any, receipt: FbxBoneReceipt) -> None:
+    """Tag the EditBone returned by Blender's creator while it is still valid."""
+    values = {
+        "_vapb_fbx_receipt_version": RECEIPT_VERSION,
+        "_vapb_fbx_source_asset_guid": receipt.source_asset_guid,
+        "_vapb_fbx_source_asset_sha256": receipt.source_asset_sha256,
+        "_vapb_fbx_model_uid": str(receipt.fbx_model_uid),
+        "_vapb_fbx_bone_receipt_id": receipt.blender_bone_receipt_id,
+        "_vapb_fbx_bone_realization_id": str(uuid.uuid4()),
+        "_vapb_fbx_receipt_evidence": receipt.evidence,
+    }
+    for key, value in values.items():
+        bone[key] = value
+
+
+def copy_with_receipt(source: Any, *, independent_mesh: bool = False) -> Any:
+    """Observe a native Object copy and retain its proven FBX lineage.
+
+    The source receipt identifies a source primitive, while realization IDs
+    distinguish objects. Shared Mesh metadata is never rewritten. Unity
+    Renderer/occurrence bindings cannot be inherited from a different object.
+    Editable occurrences can copy Mesh data while retaining proven lineage.
+    An unobserved copy or reopened object needs other evidence; this function
+    must not upgrade its copied metadata to a verified import receipt.
+    """
+    proven = validate_receipt_continuity(source) and bool(
+        source.get("_vapb_fbx_realization_id")
+    )
+    member = source.copy()
+    for key in list(member.keys()):
+        if key.startswith("_vapb_fbx_") or key == "_vapb_renderer_bindings":
+            del member[key]
+    if proven and member.data is source.data:
+        for key in source.keys():
+            if key.startswith("_vapb_fbx_"):
+                member[key] = source[key]
+        member["_vapb_fbx_source_realization_id"] = source["_vapb_fbx_realization_id"]
+        member["_vapb_fbx_realization_id"] = str(uuid.uuid4())
+        member["_vapb_fbx_object_session_uid"] = str(member.session_uid)
+        member["_vapb_fbx_receipt_evidence"] = "OBSERVED_OBJECT_COPY"
+    if independent_mesh and getattr(member, "type", None) == "MESH":
+        member.data = member.data.copy()
+        if proven and member.get("_vapb_fbx_realization_id"):
+            member.data["_vapb_fbx_mesh_session_uid"] = str(member.data.session_uid)
+            member.data["_vapb_fbx_mesh_copy_evidence"] = "OBSERVED_MEMBER_MESH_COPY"
+    return member
+
+
+def import_with_receipts(
+    path: Path,
+    import_call: Callable[[], None],
+    source_asset_guid: str,
+    bpy_module: Any,
+) -> list[FbxImportReceipt]:
+    """Run one official import with a temporary, signature-gated hook."""
+    try:
+        from io_scene_fbx import import_fbx as native_importer  # type: ignore
+
+        helper_type = native_importer.FbxImportHelperNode
+        original = helper_type.build_node_obj
+        signature = inspect.signature(original)
+        if tuple(signature.parameters)[:3] != ("self", "fbx_tmpl", "settings"):
+            import_call()
+            return []
+        semantic = RawFbxSemanticIndex.from_file(path)
+    except (ImportError, AttributeError, OSError, TypeError, ValueError):
+        import_call()
+        return []
+
+    try:
+        original_bone = helper_type.build_skeleton
+        original_pose = helper_type.set_pose_matrix_and_custom_props
+        bone_supported = (
+            tuple(inspect.signature(original_bone).parameters) ==
+            ("self", "arm", "parent_matrix", "settings", "parent_bone_size")
+            and tuple(inspect.signature(original_pose).parameters) == ("self", "arm", "settings")
+        )
+    except (AttributeError, TypeError, ValueError):
+        bone_supported = False
+
+    original_hierarchy = helper_type.build_hierarchy
+    hierarchy_supported = tuple(inspect.signature(original_hierarchy).parameters) == (
+        'self', 'fbx_tmpl', 'settings', 'scene', 'view_layer')
+    sha256 = source_sha256(path)
+    captures: list[tuple[int, Any]] = []
+    bone_captures: dict[int, dict[str, str]] = {}
+    shape_captures = {}
+    original_shapes = getattr(native_importer, 'blen_read_shapes', None)
+    shape_supported = (callable(original_shapes) and tuple(inspect.signature(original_shapes).parameters)
+                       == ('fbx_tmpl', 'fbx_data', 'objects', 'me', 'scene'))
+
+    # Observe actual creator returns and the actual material-layer write. No
+    # names, UV fingerprints or guessed source/Blender face-number joins.
+    original_material = native_importer.blen_read_material
+    original_layer = native_importer.blen_read_geom_layer_material
+    material_supported = (
+        tuple(inspect.signature(original_material).parameters) == ('fbx_tmpl', 'fbx_obj', 'settings')
+        and tuple(inspect.signature(original_layer).parameters) == ('fbx_obj', 'mesh'))
+    material_handles, material_layers = {}, {}
+
+    def material_hook(fbx_tmpl, fbx_obj, settings):
+        result = original_material(fbx_tmpl, fbx_obj, settings)
+        material_handles[result.as_pointer()] = int(fbx_obj.props[0])
+        return result
+
+    def material_layer_hook(fbx_obj, mesh):
+        result = original_layer(fbx_obj, mesh)
+        layers = [item for item in fbx_obj.elems if item.id == b'LayerElementMaterial']
+        if len(layers) == 1:
+            layer = layers[0]
+            mapping = native_importer.elem_prop_first(native_importer.elem_find_first(layer, b'MappingInformationType'))
+            reference = native_importer.elem_prop_first(native_importer.elem_find_first(layer, b'ReferenceInformationType'))
+            raw = native_importer.elem_prop_first(native_importer.elem_find_first(layer, b'Materials'))
+            if mapping == b'ByPolygon' and reference == b'IndexToDirect' and raw is not None:
+                written = material_face_state(mesh)
+                if list(raw) == written['indices'] and len(raw) == len(mesh.polygons):
+                    material_layers[mesh.as_pointer()] = (int(fbx_obj.props[0]), written)
+        return result
+
+    def shape_hook(fbx_tmpl, fbx_data, objects, me, scene):
+        result = original_shapes(fbx_tmpl, fbx_data, objects, me, scene)
+        if result:
+            rows = []
+            for uid, keys in result.items():
+                source = [row for row in fbx_data if row[0] == uid]
+                if len(keys) != 1 or len(source) != 1 or len(source[0][3]) != 1:
+                    continue  # Progressive shapes require independent support.
+                rows.append((uid, source[0][1].props[0], keys[0]))
+            shape_captures[id(me)] = rows
+        return result
+
+    def hook(self: Any, fbx_tmpl: Any, settings: Any) -> Any:
+        result = original(self, fbx_tmpl, settings)
+        model_uid = _uid(getattr(self, "fbx_elem", None).props[0]) if getattr(self, "fbx_elem", None) else None
+        if result is not None and model_uid is not None:
+            captures.append((model_uid, result))
+        return result
+
+    def hierarchy_hook(self, fbx_tmpl, settings, scene, view_layer):
+        result = original_hierarchy(self, fbx_tmpl, settings, scene, view_layer)
+        elem = getattr(self, 'fbx_elem', None)
+        if (getattr(self, 'is_armature', False) and elem is not None and elem.props
+                and result is getattr(self, 'bl_obj', None) and getattr(result, 'type', None) == 'ARMATURE'):
+            uid = _uid(elem.props[0])
+            if uid is not None and semantic.unique_source_model(uid):
+                persist_receipt(result, make_transform_receipt(uid, source_asset_guid, sha256))
+        return result
+
+    def bone_hook(self: Any, arm: Any, parent_matrix: Any, settings: Any, parent_bone_size: float = 1) -> Any:
+        bone = original_bone(self, arm, parent_matrix, settings, parent_bone_size)
+        elem = getattr(self, "fbx_elem", None)
+        model_uid = _uid(elem.props[0]) if elem is not None and elem.props else None
+        if bone is not None and model_uid is not None and semantic.unique_source_model(model_uid):
+            persist_bone_receipt(bone, make_bone_receipt(model_uid, source_asset_guid, sha256))
+            bone_captures[id(self)] = {key: bone[key] for key in bone.keys() if key.startswith("_vapb_fbx_")}
+        return bone
+
+    def pose_hook(self: Any, arm: Any, settings: Any) -> Any:
+        result = original_pose(self, arm, settings)
+        values = bone_captures.get(id(self))
+        if values is not None:
+            # The official importer assigned bl_bone from the newly created
+            # EditBone.name and uses this same key to resolve its PoseBone.
+            pose_bone = self.bl_obj.pose.bones[self.bl_bone]
+            if all(pose_bone.bone.get(key) == value for key, value in values.items()):
+                for key, value in values.items():
+                    pose_bone[key] = value
+        return result
+
+    try:
+        helper_type.build_node_obj = hook
+        if hierarchy_supported:
+            helper_type.build_hierarchy = hierarchy_hook
+        if shape_supported:
+            native_importer.blen_read_shapes = shape_hook
+        if material_supported:
+            native_importer.blen_read_material = material_hook
+            native_importer.blen_read_geom_layer_material = material_layer_hook
+        if bone_supported:
+            helper_type.build_skeleton = bone_hook
+            helper_type.set_pose_matrix_and_custom_props = pose_hook
+        import_call()
+    finally:
+        helper_type.build_node_obj = original
+        if hierarchy_supported:
+            helper_type.build_hierarchy = original_hierarchy
+        if shape_supported:
+            native_importer.blen_read_shapes = original_shapes
+        if material_supported:
+            native_importer.blen_read_material = original_material
+            native_importer.blen_read_geom_layer_material = original_layer
+        if bone_supported:
+            helper_type.build_skeleton = original_bone
+            helper_type.set_pose_matrix_and_custom_props = original_pose
+
+    receipts: list[FbxImportReceipt] = []
+    material_root = None
+    for model_uid, obj in captures:
+        geometry_uid = semantic.geometry_for_model(model_uid)
+        if geometry_uid is None:
+            continue
+        receipt = make_receipt(model_uid, geometry_uid, source_asset_guid, sha256)
+        persist_receipt(obj, receipt)
+        if getattr(obj, 'type', None) == 'MESH':
+            if material_root is None:
+                from io_scene_fbx.parse_fbx import parse
+                material_root, _ = parse(str(path), use_namedtuple=True)
+            persist_material_receipt(obj, path, sha256, geometry_uid, semantic,
+                                     material_handles, material_layers, native_importer, bpy_module,
+                                     _raw_root=material_root)
+        if getattr(obj, 'type', None) == 'MESH' and id(obj.data) in shape_captures:
+            persist_shape_receipts(obj.data, sha256, geometry_uid, shape_captures[id(obj.data)])
+        receipts.append(receipt)
+    return receipts
+
+
+def material_face_state(mesh):
+    """Actual polygon-loop incidence and material-layer output, without UV."""
+    return dict(starts=[p.loop_start for p in mesh.polygons],
+                loops=[loop.vertex_index for loop in mesh.loops],
+                indices=[p.material_index for p in mesh.polygons])
+
+
+def material_geometry_sha(mesh):
+    state = material_face_state(mesh)
+    state['positions'] = [list(vertex.co) for vertex in mesh.vertices]
+    return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
+
+
+def empty_fbx_preview_path(image, bpy):
+    """Observe an empty missing-file preview without loading its pixel buffer."""
+    if image.library or image.source != 'FILE' or image.get('unity_guid') or not image.filepath:
+        return None
+    path = Path(bpy.path.abspath(image.filepath)).resolve()
+    if (path.exists() or image.has_data or image.is_dirty or image.packed_file is not None
+            or tuple(image.size) != (0, 0)):
+        return None
+    return str(path)
+
+
+def _material_remaps_supported(meta_text, serialized):
+    """Retain exact Material remaps; native witness still establishes correspondence."""
+    from ..unity.material_mapping import parse_external_object_rows
+    if serialized in ({}, []):
+        return True
+    if not isinstance(serialized, list):
+        return False
+    rows = parse_external_object_rows(meta_text)
+    return (len(rows) == len(serialized) and all(
+        row.row_status == 'valid' and not row.ambiguous and row.canonical_second_type == 2
+        and row.canonical_name and not row.canonical_name.startswith('VAPB_SOURCE_MATERIAL_UID_')
+        for row in rows))
+
+
+def persist_material_receipt(obj, path, sha, geometry_uid, semantic, handles, layers, importer, bpy,
+                             *, _raw_root=None):
+    """Retain observed writes; Skin facts do not prove Unity Material mapping."""
+    # Share only this import's read-only parse across its Mesh receipts. Do not
+    # retain a path cache across imports or reuse the native importer's tree.
+    if _raw_root is None:
+        from io_scene_fbx.parse_fbx import parse
+        _raw_root, _ = parse(str(path), use_namedtuple=True)
+    root = _raw_root
+    objects = next((item for item in root.elems if item.id == b'Objects'), None)
+    if objects is None:
+        return
+    geometries = [item for item in objects.elems if item.id == b'Geometry']
+    model_uid = _uid(obj.get('_vapb_fbx_model_uid'))
+    skin = (len(obj.modifiers) == 1 and obj.modifiers[0].type == 'ARMATURE'
+            and obj.modifiers[0].object is not None and not obj.data.shape_keys)
+    if skin:
+        selected = [item for item in geometries if item.props[0] == geometry_uid
+                    and len(item.props) > 2 and item.props[2] == b'Mesh']
+        if (len(selected) != 1 or not semantic.unique_source_model(model_uid)
+                or semantic.geometry_for_model(model_uid) != geometry_uid
+                or sum(link.geometry_uid == geometry_uid for link in semantic.links) != 1
+                or any(not item.props or type(item.props[0]) is not int for item in objects.elems)
+                or len({item.props[0] for item in objects.elems}) != len(objects.elems)):
+            return
+    elif (len(geometries) != 1 or any(item.id == b'Deformer' for item in objects.elems)
+            or len(semantic.links) != 1 or obj.modifiers or obj.data.shape_keys):
+        return
+    capture = layers.get(obj.data.as_pointer())
+    if capture is None or capture[0] != geometry_uid or capture[1] != material_face_state(obj.data):
+        return  # Mesh.validate()/material-index clamping invalidated the write.
+    slots = [handles.get(slot.material.as_pointer()) if slot.material else None for slot in obj.material_slots]
+    indices = capture[1]['indices']
+    if (not slots or None in slots or len(set(slots)) != len(slots)
+            or set(indices) != set(range(len(slots)))
+            or any(len(p.vertices) < 3 if skin else len(p.vertices) not in (3, 4)
+                   for p in obj.data.polygons)):
+        return
+    # KeepQuads support is deliberately restricted to exact axis-planar quads.
+    for face in obj.data.polygons:
+        if not skin and len(face.vertices) == 4:
+            points = [obj.data.vertices[i].co for i in face.vertices]
+            if not any(len({point[axis] for point in points}) == 1 for axis in range(3)):
+                return
+    importer_sha = hashlib.sha256(Path(importer.__file__).read_bytes()).hexdigest()
+    if (bpy.app.version != ((5, 2, 3) if skin else (5, 2, 1))
+            or importer_sha != '262127c8e6af3e748d696d81070366f39e449aa73e6bc1d9463092b5cbf86741'):
+        return
+    from ..unity.yaml_parser import _parse_document_body
+    meta = Path(str(path) + '.meta')
+    if not meta.is_file():
+        return
+    meta_text = meta.read_text(encoding='utf-8-sig')
+    parsed = _parse_document_body(meta_text)
+    policy = parsed.get('ModelImporter', {})
+    meshes = policy.get('meshes', {})
+    if (meshes.get('keepQuads') != (0 if skin else 1) or meshes.get('meshCompression') != 0
+            or meshes.get('weldVertices') != 1 or meshes.get('meshOptimizationFlags') != -1
+            or policy.get('materials', {}).get('materialImportMode') != (1 if skin else 2)):
+        return
+    if skin and (not _material_remaps_supported(meta_text, policy.get('externalObjects'))
+            or any(policy.get('materials', {}).get(key) != value for key, value in
+                   (('materialName', 0), ('materialSearch', 1), ('materialLocation', 1)))):
+        return
+    for slot, uid in zip(obj.material_slots, slots):
+        slot.material['_vapb_fbx_material_uid'] = str(uid)
+        slot.material['_vapb_fbx_material_source_sha256'] = sha
+        if skin:
+            slot.material['_vapb_fbx_material_source_guid'] = parsed.get('guid')
+            slot.material['_vapb_fbx_material_source_meta_sha256'] = source_sha256(meta)
+            # Empty native placeholders have no Texture payload or identity.
+            # Detach only during fresh import; keep the datablock and source.
+            # Later unknown Images still follow the ordinary export refusal.
+            for node in slot.material.node_tree.nodes if slot.material.node_tree else ():
+                image = getattr(node, 'image', None)
+                if image is not None and empty_fbx_preview_path(image, bpy):
+                    node.image = None
+    table = dict(schema='vapb-fbx-material-write-1', fbx_sha256=sha, geometry_uid=geometry_uid,
+                 meta_sha256=source_sha256(meta), asset_guid=parsed.get('guid'),
+                 importer_sha256=importer_sha, slots=slots,
+                 faces=[dict(uid=slots[p.material_index], topology=len(p.vertices)) for p in obj.data.polygons],
+                 geometry_sha256=material_geometry_sha(obj.data),
+                 links=[slot.link for slot in obj.material_slots])
+    if skin:
+        # The legacy static consumer rejects this distinct schema. Raw polygon
+        # topology and slot UIDs are import facts, never native submesh ordinals.
+        table.update(schema='vapb-fbx-material-source-1', model_uid=model_uid,
+                     unity_mapping='PENDING_SOURCE_WITNESS', blender_version=list(bpy.app.version))
+    obj['_vapb_fbx_material_receipt'] = json.dumps(table, sort_keys=True)
