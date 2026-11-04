@@ -2,6 +2,14 @@
 
 VAPB は、Unity の `.unitypackage` のうち対応するアセットを Blender に読み込み、Blender で編集した対応データを Unity へ戻すための実験的なアドオンです。この配布候補は開発プレビューです。すべての VRChat アバターや Unity 状態を往復できることを保証する正式リリースではありません。
 
+## 開発版ZIPの入手
+
+[VAPB-alpha-b3f141d.zip をダウンロード](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-b3f141d.zip)
+
+**Development Preview / Alpha**。419,333 bytes。ZIP元コミットは `b3f141d601dc59964332275669b9be72e3bb9b2b`、SHA-256 は `414173627d984d6a710cf9d9812cd88d6457a88510f2154e29c6443c38fbb5b2` です。GitHubの「Code → Download ZIP」はソース一式なので、上記のアドオンZIPを使ってください。
+
+このZIPで通常インストール、有効化・無効化・再有効化、実衣装のPrefab選択Import、UV・元テクスチャ・FBX抽出、UnityPackage書き出しを実GUI確認しました。FBXの別プロセス再読込も確認しました。対象と未検証範囲は [検証記録](VALIDATION.md) を参照してください。Unityへの完全復元やVRChat動作を保証するものではありません。
+
 ## インストール
 
 1. 別途用意された VAPB アドオン ZIP を取得します。
@@ -48,7 +56,7 @@ Unity 側では VAPB の確認画面で内容を確認し、明示的に適用�
 
 ## バージョンと検証記録
 
-アドオンの Blender 最小バージョン表示は 5.2.0、製品仕様は Blender 5.2.1 LTS を対象にしています。保存されている配布インストール記録には Blender 5.2.3 LTS での確認がありますが、この固定ソース候補そのもののインストール確認ではありません。これら以外の Blender バージョンは未検証です。Unity 側ヘルパーは Unity Editor API を使います。既存の限定的な記録には Unity 2022.3.22f1 が含まれますが、全 Unity バージョンや全プロジェクトでの互換性を示すものではありません。VRChat SDK と実行時互換性は未検証です。
+アドオンの Blender 最小バージョン表示は 5.2.0、製品仕様は Blender 5.2.1 LTS を対象にしています。この固定ZIPは Blender 5.2.3 LTS で通常インストールと代表操作を確認しました。ZIP内READMEはビルド時点の記録で、検証後の結果はこのREADMEと検証記録に記載しています。これら以外の Blender バージョンは未検証です。Unity 側ヘルパーは Unity Editor API を使います。既存の限定的な記録には Unity 2022.3.22f1 が含まれますが、全 Unity バージョンや全プロジェクトでの互換性を示すものではありません。VRChat SDK と実行時互換性は未検証です。
 
 ## ライセンス
 
