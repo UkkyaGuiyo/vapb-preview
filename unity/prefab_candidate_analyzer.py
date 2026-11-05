@@ -19,7 +19,6 @@ from .material_mapping import parse_external_objects
 from .package_reader import PackageIndex, PackageRecord, UnityPackageReader
 from .package_identity import PackageIdentity, distinct_package_paths
 from .prefab_parser import MESH_RENDERER, SKINNED_MESH_RENDERER, PrefabData, parse_prefab
-from .yaml_parser import parse_unity_yaml
 from ..blender.performance import diagnostic_add
 
 
@@ -314,10 +313,9 @@ class PrefabCandidateAnalyzer:
             mesh = document.data.get("m_Mesh")
             if isinstance(mesh, dict) and mesh.get("guid"):
                 fbx.add(str(mesh["guid"]).lower())
-        for document in prefab.renderer_documents():
             values = document.data.get("m_Materials")
             if not isinstance(values, list):
-                values = [document.data["m_Material"]] if "m_Material" in document.data else []
+                values = [document.data.get("m_Material")]
             for value in values:
                 if isinstance(value, dict) and value.get("guid"):
                     materials.add(str(value["guid"]).lower())
@@ -429,9 +427,7 @@ class PrefabCandidateAnalyzer:
             elif suffix == ".prefab":
                 payload = self.cache.read_asset(source, guid)
                 text = payload.decode("utf-8", "replace")
-                nested = PrefabData(Path(record.unity_path), parse_unity_yaml(text), {}, {})
-                meshes, materials, _slots = self._prefab_refs(nested)
-                queue.extend(sorted((meshes | materials | nested.referenced_nested_prefab_guids()) - visited))
+                queue.extend(sorted(set(re.findall(r"m_SourcePrefab:.*?guid:\s*([0-9a-fA-F]{32})", text, re.DOTALL)) - visited))
         result = required, resolved, unresolved, ambiguous, providers
         self._closure_cache[key] = tuple(set(item) for item in result)  # type: ignore[assignment]
         return result

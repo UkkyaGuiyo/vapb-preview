@@ -4,7 +4,7 @@ import bpy
 from bpy.props import BoolProperty, StringProperty
 
 from ..blender.editing_workspace import member_for_object
-from ..export.prefab_assets import export_prefab_assets, partial_export_message
+from ..export.prefab_assets import export_prefab_assets
 
 
 class VAPB_OT_export_prefab_assets(bpy.types.Operator):
@@ -38,7 +38,6 @@ class VAPB_OT_export_prefab_assets(bpy.types.Operator):
         layout = self.layout
         layout.label(text=f"\u5bfe\u8c61Prefab: {self.target_name}", icon="OUTLINER_COLLECTION")
         layout.prop(self, "destination")
-        layout.label(text="既存の保存先に、新しい出力フォルダーを作ります", icon="INFO")
         layout.separator()
         layout.prop(self, "export_uv")
         layout.prop(self, "export_textures")
@@ -70,10 +69,15 @@ class VAPB_OT_export_prefab_assets(bpy.types.Operator):
         except (OSError, RuntimeError, ValueError, KeyError) as exc:
             self.report({"ERROR"}, f"Prefab\u7d20\u6750\u306e\u66f8\u304d\u51fa\u3057\u306b\u5931\u6557\u3057\u307e\u3057\u305f: {exc}")
             return {"CANCELLED"}
+        missing = len(manifest["missing"])
         if manifest["status"] == "COMPLETE":
             self.report({"INFO"}, f"{member.name}: 書き出しました ({path})")
         else:
-            self.report({"WARNING"}, partial_export_message(member.name, path, manifest))
+            message = f"{member.name}: 一部出力 {path}、不足または未対応 {missing} 件"
+            fbx = manifest["outputs"].get("fbx", {})
+            if fbx.get("status") == "FAILED":
+                message = f"FBXは未出力: {fbx['reason']}。出力の詳細は保存先のmanifest.jsonに記録しました"
+            self.report({"WARNING"}, message)
         return {"FINISHED"}
 
 

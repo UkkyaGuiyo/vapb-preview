@@ -1215,18 +1215,6 @@ class UNITYPACKAGE_OT_import(bpy.types.Operator, ImportHelper):
                 if Path(record.unity_path).suffix.lower() == suffix
             }
 
-        def is_nonvisual_helper(prefab) -> bool:
-            if not prefab.documents:
-                return False
-            for document in prefab.documents:
-                if document.class_id not in {1, 4, 114}:
-                    return False
-                script = (ref_guid(document.data.get("m_Script")) or "") if document.class_id == 114 else ""
-                guids = {guid.lower() for guid in re.findall(r"\bguid:\s*([0-9a-fA-F]{32})", document.raw)}
-                if guids - {script.lower(), "0" * 32}:
-                    return False
-            return True
-
         wanted: set[str] = set()
         fbx_guids: set[str] = set()
         material_guids: set[str] = set()
@@ -1263,8 +1251,7 @@ class UNITYPACKAGE_OT_import(bpy.types.Operator, ImportHelper):
         diagnostic_add("selected_fbx_guids", len(fbx_guids))
         if self.import_mode == "RAW_FBX" or (not fbx_guids and not prefabs):
             fbx_guids = records_with_suffix(".fbx")
-        elif not fbx_guids and any(not is_nonvisual_helper(prefab) for prefab in prefabs):
-            # Only proven helper structure can skip the legacy fallback.
+        elif not fbx_guids:
             # Some Unity prefab exports omit the MeshFilter reference while
             # still shipping one unambiguous model representation.  Use that
             # representation only when package structure proves uniqueness;
@@ -2305,8 +2292,7 @@ class UNITYPACKAGE_OT_import_prefab(bpy.types.Operator):
         self.layout.prop(self, "show_details")
         if not self.show_details:
             return
-        details = [candidate] if candidate is not None else session.operator._candidate_analyses
-        for candidate in details:
+        for candidate in session.operator._candidate_analyses:
             detail = self.layout.box()
             detail.label(text=candidate.display_name)
             detail.label(text=candidate.unity_path)
