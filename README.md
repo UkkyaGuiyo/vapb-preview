@@ -10,17 +10,15 @@ VAPB は、Unity の `.unitypackage` のうち対応するアセットを Blende
 - 非表示の補助Prefabだけを選択した場合に無関係な単一FBXを読み込む処理を、構造を確認できる限定条件で抑止しました。
 - Prefab詳細表示とMaterialスロット数を修正し、参照先Prefab内のMesh・Material依存関係を追跡します。Nested Prefabの編集対象を正確に復元できない場合の拒否は維持します。
 
-以下の旧ZIPの実GUI記録は旧版の検証です。このソースから作る新ZIPは別途検証し、結果と取得先を公開時に更新します。
+## 開発版ZIPの入手
 
-## 前回検証済みZIPの入手
+[VAPB-alpha-14ef77e.zip をダウンロード](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-14ef77e.zip)
 
-[VAPB-alpha-6317c05.zip をダウンロード](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-6317c05.zip)
+**Development Preview / Alpha**。424,045 bytes。元ソースは `14ef77e5b756a8f202f1faad4717c41d7476fd19`、SHA-256 は `02fe16fcead943022b75f49fb558f10f08986d10c3413cf88e927e42943caff4` です。GitHubの「Code → Download ZIP」ではなく、このアドオンZIPを使ってください。
 
-**Development Preview / Alpha**。422,231 bytes。ZIP元コミットは `6317c059b1a5da33a2a55a8f642a964533e9bdc6`、SHA-256 は `da489a18e98237be2041239f654f2d31244e6d6b7457bd74cfcea3df61c3f9c7` です。GitHubの「Code → Download ZIP」はソース一式なので、上記のアドオンZIPを使ってください。
+Blender 5.2.3 LTSの通常インストールAPIで有効化・無効化・再有効化とメニュー登録を確認しました。実衣装1件を読み込み、UV・元Texture・FBXとUnityPackageを書き出しました。FBXを別プロセスで読み直し、現在のMesh識別・UV・Material Slot・Weightを比較しました。位置と骨のRest Poseには数値差が残り、完全一致を保証しません。このZIPの新しいGUI操作、Unity適用、VRChat動作は未検証です。対象と限界は [検証記録](VALIDATION.md) に記載しています。
 
-このZIPで通常インストール、有効化・無効化・再有効化、実衣装のPrefab選択Import、UV・元テクスチャ・FBX抽出、UnityPackage書き出しを実GUI確認しました。今回出力したFBXの別プロセス再読込と、今回出力したUnityPackageのUnity適用は未実施です。同一Python実装の旧版でのFBX再読込実証と、選定した開発ソースのUnity実証は、今回のZIP検証とは区別しています。対象と未検証範囲は [検証記録](VALIDATION.md) を参照してください。Unityへの完全復元やVRChat動作を保証するものではありません。
-
-以前の `VAPB-alpha-b3f141d.zip` は変更せず残しています。今回の限定平行移動復元と拒否理由表示の改善は旧ZIPに含まれません。
+以前の [6317c05版](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-6317c05.zip) と b3f141d版は上書きせず残しています。それらのGUI実証を新ZIPのGUI検証とは扱いません。
 
 ## インストール
 
