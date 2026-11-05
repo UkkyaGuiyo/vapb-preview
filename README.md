@@ -2,19 +2,23 @@
 
 VAPB は、Unity の `.unitypackage` のうち対応するアセットを Blender に読み込み、Blender で編集した対応データを Unity へ戻すための実験的なアドオンです。この配布候補は開発プレビューです。すべての VRChat アバターや Unity 状態を往復できることを保証する正式リリースではありません。
 
-## 今回の更新
+## このソースの更新内容
 
-選択したSkin MeshのObjectを平行移動してUnityへ戻す限定対応と、Unityの適用拒否後に原因・対処を表示する改善を収録しました。骨格が変わらず、移動対象が末端のRendererで、既存のbounds内に収まり、他Componentが対象を動かしていないことなどを確認できる場合だけ適用します。回転・拡縮・ShapeやActionとの組み合わせを一般対応するものではありません。
+- 素材Exportの部分成功を日本語で説明し、未解決のTexture参照と不足ファイル数を混同しないようにしました。
+- UV座標があるのにPNGが透明になる一部の条件を検出し、保持したSVGでの確認を案内します。すべてのUV Islandの描画精度を保証する検査ではありません。
+- FBX書き出し失敗時の不完全なファイルを出力結果から除き、UVと元Textureの独立出力を保ちます。
+- 非表示の補助Prefabだけを選択した場合に無関係な単一FBXを読み込む処理を、構造を確認できる限定条件で抑止しました。
+- Prefab詳細表示とMaterialスロット数を修正し、参照先Prefab内のMesh・Material依存関係を追跡します。Nested Prefabの編集対象を正確に復元できない場合の拒否は維持します。
 
 ## 開発版ZIPの入手
 
-[VAPB-alpha-6317c05.zip をダウンロード](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-6317c05.zip)
+[VAPB-alpha-14ef77e.zip をダウンロード](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-14ef77e.zip)
 
-**Development Preview / Alpha**。422,231 bytes。ZIP元コミットは `6317c059b1a5da33a2a55a8f642a964533e9bdc6`、SHA-256 は `da489a18e98237be2041239f654f2d31244e6d6b7457bd74cfcea3df61c3f9c7` です。GitHubの「Code → Download ZIP」はソース一式なので、上記のアドオンZIPを使ってください。
+**Development Preview / Alpha**。424,045 bytes。元ソースは `14ef77e5b756a8f202f1faad4717c41d7476fd19`、SHA-256 は `02fe16fcead943022b75f49fb558f10f08986d10c3413cf88e927e42943caff4` です。GitHubの「Code → Download ZIP」ではなく、このアドオンZIPを使ってください。
 
-このZIPで通常インストール、有効化・無効化・再有効化、実衣装のPrefab選択Import、UV・元テクスチャ・FBX抽出、UnityPackage書き出しを実GUI確認しました。今回出力したFBXの別プロセス再読込と、今回出力したUnityPackageのUnity適用は未実施です。同一Python実装の旧版でのFBX再読込実証と、選定した開発ソースのUnity実証は、今回のZIP検証とは区別しています。対象と未検証範囲は [検証記録](VALIDATION.md) を参照してください。Unityへの完全復元やVRChat動作を保証するものではありません。
+Blender 5.2.3 LTSで、この同じZIPを「ディスクからインストール」し、有効化・無効化・再有効化とImport／Exportメニューを実GUI確認しました。119ファイルがZIPと一致しています。別のAPI検証では実衣装1体のImport、UV・元Texture・FBX・UnityPackage出力とFBXの別プロセス再読込を確認しました。これらの実データ操作は今回のGUIインストール検証とは別です。位置と骨のRest Poseには数値差が残り、新ZIPからのUnity適用とVRChat動作は未検証です。初回GUI試行のTemp分離漏れと、修正後の再検証も [検証記録](VALIDATION.md) に記載しています。
 
-以前の `VAPB-alpha-b3f141d.zip` は変更せず残しています。今回の限定平行移動復元と拒否理由表示の改善は旧ZIPに含まれません。
+以前の [6317c05版](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-6317c05.zip) と b3f141d版は上書きせず残しています。それらのGUI実証を新ZIPのGUI検証とは扱いません。
 
 ## インストール
 
@@ -37,7 +41,7 @@ Import時に編集したいPrefabを選択します。読み込み後は3Dビュ
 3. UVレイアウト（PNGとSVG）、元テクスチャ、FBXを個別にON／OFFにし、既存の保存先フォルダーを指定して実行します。初期状態はすべてONで、少なくとも一項目の選択が必要です。その中にPrefab名を含む新しい出力フォルダーが作られます。
 4. 出力先の `manifest.json` でMesh・UV・Material・Textureの対応と不足項目を確認します。一部の出力に失敗した場合は部分結果として報告します。
 
-対象は選択部品の属するPrefab一つです。必要なArmatureは含めますが、無関係なPrefabは混ぜません。UVの自動展開は行いません。元テクスチャは参照先の元ファイルを取得し、存在しないPSDレイヤーなどは作りません。FBXにはUnity／VRChat固有Componentの完全な設定を格納できません。既存ファイルの上書きを避けるため、空の新しい保存先を使ってください。
+出力対象は選択部品の属する現在のBlenderメンバーと、必要なArmatureです。元PrefabがFBX内の一部だけを参照していても、FBX全体がそのメンバーへ読み込まれる場合があります。元Prefabだけの正確なMesh範囲は未確認であり、出力前に部品を確認してください。manifestのCOMPLETEは要求した出力処理の完了を示し、元Prefabとの完全一致を保証しません。UVの自動展開は行いません。元テクスチャは参照先の元ファイルを取得し、存在しないPSDレイヤーなどは作りません。FBXにはUnity／VRChat固有Componentの完全な設定を格納できません。既存ファイルの上書きを避けるため、空の新しい保存先を使ってください。
 
 ## Unityへ戻す
 
@@ -62,7 +66,7 @@ Unity 側では VAPB の確認画面で内容を確認し、明示的に適用�
 
 ## バージョンと検証記録
 
-アドオンの Blender 最小バージョン表示は 5.2.0、製品仕様は Blender 5.2.1 LTS を対象にしています。この固定ZIPは Blender 5.2.3 LTS で通常インストールと代表操作を確認しました。ZIP内READMEはビルド時点の記録で、検証後の結果はこのREADMEと検証記録に記載しています。これら以外の Blender バージョンは未検証です。Unity 側ヘルパーは Unity Editor API を使います。既存の限定的な記録には Unity 2022.3.22f1 が含まれますが、全 Unity バージョンや全プロジェクトでの互換性を示すものではありません。VRChat SDK と実行時互換性は未検証です。
+アドオンの Blender 最小バージョン表示は 5.2.0、製品仕様は Blender 5.2.1 LTS を対象にしています。この固定ZIPは Blender 5.2.3 LTS で通常インストールとメニュー操作を実GUI確認しました。実データの代表操作は別のAPI検証です。ZIP内READMEはビルド時点の記録で、検証後の結果はこのREADMEと検証記録に記載しています。これら以外の Blender バージョンは未検証です。Unity 側ヘルパーは Unity Editor API を使います。既存の限定的な記録には Unity 2022.3.22f1 が含まれますが、全 Unity バージョンや全プロジェクトでの互換性を示すものではありません。VRChat SDK と実行時互換性は未検証です。
 
 ## ライセンス
 
