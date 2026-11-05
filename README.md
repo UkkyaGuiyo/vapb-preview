@@ -2,19 +2,19 @@
 
 VAPB は、Unity の `.unitypackage` のうち対応するアセットを Blender に読み込み、Blender で編集した対応データを Unity へ戻すための実験的なアドオンです。この配布候補は開発プレビューです。すべての VRChat アバターや Unity 状態を往復できることを保証する正式リリースではありません。
 
-## 次の更新候補（未公開）
+## 今回の更新
 
-選択したSkin MeshのObjectを平行移動してUnityへ戻す限定対応と、Unityの適用拒否後に原因・対処を表示する改善を準備しています。骨格が変わらず、移動対象が末端のRendererで、既存のbounds内に収まり、他Componentが対象を動かしていないことなどを確認できる場合だけ適用します。回転・拡縮・ShapeやActionとの組み合わせを一般対応するものではありません。
-
-この候補の新しいZIPは検証中です。以下の公開済みZIPにはこの変更を含みません。
+選択したSkin MeshのObjectを平行移動してUnityへ戻す限定対応と、Unityの適用拒否後に原因・対処を表示する改善を収録しました。骨格が変わらず、移動対象が末端のRendererで、既存のbounds内に収まり、他Componentが対象を動かしていないことなどを確認できる場合だけ適用します。回転・拡縮・ShapeやActionとの組み合わせを一般対応するものではありません。
 
 ## 開発版ZIPの入手
 
-[VAPB-alpha-b3f141d.zip をダウンロード](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-b3f141d.zip)
+[VAPB-alpha-6317c05.zip をダウンロード](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-6317c05.zip)
 
-**Development Preview / Alpha**。419,333 bytes。ZIP元コミットは `b3f141d601dc59964332275669b9be72e3bb9b2b`、SHA-256 は `414173627d984d6a710cf9d9812cd88d6457a88510f2154e29c6443c38fbb5b2` です。GitHubの「Code → Download ZIP」はソース一式なので、上記のアドオンZIPを使ってください。
+**Development Preview / Alpha**。422,231 bytes。ZIP元コミットは `6317c059b1a5da33a2a55a8f642a964533e9bdc6`、SHA-256 は `da489a18e98237be2041239f654f2d31244e6d6b7457bd74cfcea3df61c3f9c7` です。GitHubの「Code → Download ZIP」はソース一式なので、上記のアドオンZIPを使ってください。
 
-このZIPで通常インストール、有効化・無効化・再有効化、実衣装のPrefab選択Import、UV・元テクスチャ・FBX抽出、UnityPackage書き出しを実GUI確認しました。FBXの別プロセス再読込も確認しました。対象と未検証範囲は [検証記録](VALIDATION.md) を参照してください。Unityへの完全復元やVRChat動作を保証するものではありません。
+このZIPで通常インストール、有効化・無効化・再有効化、実衣装のPrefab選択Import、UV・元テクスチャ・FBX抽出、UnityPackage書き出しを実GUI確認しました。今回出力したFBXの別プロセス再読込と、今回出力したUnityPackageのUnity適用は未実施です。同一Python実装の旧版でのFBX再読込実証と、選定した開発ソースのUnity実証は、今回のZIP検証とは区別しています。対象と未検証範囲は [検証記録](VALIDATION.md) を参照してください。Unityへの完全復元やVRChat動作を保証するものではありません。
+
+以前の `VAPB-alpha-b3f141d.zip` は変更せず残しています。今回の限定平行移動復元と拒否理由表示の改善は旧ZIPに含まれません。
 
 ## インストール
 
