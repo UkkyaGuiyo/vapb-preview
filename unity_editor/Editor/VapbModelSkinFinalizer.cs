@@ -78,6 +78,7 @@ public static partial class VapbModelSkinFinalizer
     private static string witnessPath;
     private static HashSet<string> witnessUids;
     private static bool unexpectedWitnessUid;
+    private static string lastApplyError;
     private static readonly Dictionary<string, int> callbackCounts = new Dictionary<string, int>(StringComparer.Ordinal);
 
     [Serializable] private sealed class Manifest { public string schema_version; public Task[] reference_rebind_tasks; public ExternalDependency[] external_dependencies; }
@@ -183,6 +184,7 @@ public static partial class VapbModelSkinFinalizer
         public string rootUid;
         public Material[] materials;
         public SourceBoneRest[] sourceRest;
+        public Vector3? rendererLocalPosition;
     }
     private sealed class SourceBoneRest
     {
@@ -236,9 +238,9 @@ public static partial class VapbModelSkinFinalizer
     static VapbModelSkinFinalizer() { RegisterAssistant(); }
     private static void RegisterAssistant()
     {
-        VapbImportAssistant.Register(Kind, InspectForAssistant, Apply);
-        VapbImportAssistant.Register(DirectKind, InspectForAssistant, Apply);
-        VapbImportAssistant.Register(SourceKind, InspectForAssistant, Apply);
+        VapbImportAssistant.Register(Kind, InspectForAssistant, Apply, failureReason: () => lastApplyError);
+        VapbImportAssistant.Register(DirectKind, InspectForAssistant, Apply, failureReason: () => lastApplyError);
+        VapbImportAssistant.Register(SourceKind, InspectForAssistant, Apply, failureReason: () => lastApplyError);
     }
 
     private static VapbImportAssistant.Inspection InspectForAssistant(string path)
@@ -411,6 +413,7 @@ public static partial class VapbModelSkinFinalizer
 
     public static bool Apply(string manifestAssetPath)
     {
+        lastApplyError = null;
         try
         {
             Manifest manifest = ReadManifest(manifestAssetPath);
@@ -453,7 +456,8 @@ public static partial class VapbModelSkinFinalizer
         }
         catch (Exception error)
         {
-            Debug.LogError("VAPB_MODEL_SKIN_VARIANT_REJECTED=" + SafeError(error));
+            lastApplyError = SafeError(error);
+            Debug.LogError("VAPB_MODEL_SKIN_VARIANT_REJECTED=" + lastApplyError);
             return false;
         }
     }
@@ -1747,11 +1751,13 @@ public static partial class VapbModelSkinFinalizer
             if (!FiniteMatrix(mesh.bindposes[i]) || !FiniteMatrix(expected)) Reject("EDITED_REST_MISMATCH");
             if (!SameMatrix(mesh.bindposes[i], expected, 0.001f))
             {
-                if (direct || !source.sourceModel) Reject("EDITED_REST_MISMATCH");
+                if (!direct && !source.sourceModel) Reject("EDITED_REST_MISMATCH");
                 authoredRest = true;
             }
         }
-        edited.sourceRest = authoredRest ? PrepareSourceBoneRest(target, edited, source) : null;
+        edited.rendererLocalPosition = direct && authoredRest ?
+            PrepareDirectRendererTranslation(witness, target, edited, source, allowDirectTopologyChange) : (Vector3?)null;
+        edited.sourceRest = !direct && authoredRest ? PrepareSourceBoneRest(target, edited, source) : null;
         ValidateWeights(mesh, edited.editedBoneUids.Length);
         if (directFirstShape)
         {
@@ -1770,6 +1776,122 @@ public static partial class VapbModelSkinFinalizer
                     !BoundsContainsPoint(shaped.max, target.localBounds, 0.001f))
                     Reject("TARGET_LOCAL_BOUNDS_INSUFFICIENT");
             }
+        }
+    }
+
+    private static Vector3 PrepareDirectRendererTranslation(WitnessResult witness,
+        SkinnedMeshRenderer target, EditedIdentity edited, SourceIdentity source, bool withoutAction)
+    {
+        // This fallback moves one leaf renderer, never its shared skeleton. Its delta
+        // comes from native renderer frames, not a fit to the bindposes being tested.
+        if (!withoutAction || source.renderer == null || source.nullBoneUids.Count != 0 ||
+            source.bindingHierarchyDiffers || witness.sourceLayout.shapeNames.Length != 0 ||
+            edited.mesh.blendShapeCount != 0)
+            Reject("EDITED_REST_MISMATCH");
+        ValidateTranslationScope(target.transform.root.gameObject, target);
+        ValidateTranslationScope(edited.renderer.transform.root.gameObject, edited.renderer);
+        Matrix4x4 originalFrame = source.renderer.transform.localToWorldMatrix;
+        Matrix4x4 editedFrame = edited.renderer.transform.localToWorldMatrix;
+        if (!FiniteMatrix(originalFrame) || !FiniteMatrix(editedFrame) ||
+            !SameMatrix(originalFrame * originalFrame.inverse, Matrix4x4.identity, 0.001f) ||
+            !SameMatrix(source.renderer.transform.root.localToWorldMatrix, Matrix4x4.identity, 0.001f) ||
+            !SameMatrix(edited.renderer.transform.root.localToWorldMatrix, Matrix4x4.identity, 0.001f))
+            Reject("EDITED_REST_MISMATCH");
+        Matrix4x4 delta = originalFrame.inverse * editedFrame;
+        Vector3 translation = delta.GetColumn(3);
+        if (!Finite(translation) || !SameMatrix(delta, Matrix4x4.Translate(translation), 0.001f))
+            Reject("EDITED_REST_MISMATCH");
+        for (int i = 0; i < edited.editedBoneUids.Length; i++)
+        {
+            string uid = edited.editedBoneUids[i];
+            int slot = Array.IndexOf(source.sourceBoneUids, uid);
+            if (slot < 0 || !source.authoringBonesByUid.TryGetValue(uid, out Transform authoringBone) ||
+                authoringBone == null || edited.renderer.bones[i] == null ||
+                !SameMatrix(authoringBone.localToWorldMatrix, edited.renderer.bones[i].localToWorldMatrix, 0.001f) ||
+                !SameMatrix(edited.mesh.bindposes[i], witness.sourceBindposes[slot] * delta, 0.001f))
+                Reject("EDITED_REST_MISMATCH");
+        }
+        // Bounds are expressed relative to the retained rootBone. Preserve them;
+        // a translated mesh outside that envelope remains unsupported.
+        if (!TryRestMeshBounds(target, edited.mesh, MappedTargetBones(edited, source), out Bounds rest) ||
+            !BoundsContainsPoint(rest.min, target.localBounds, 0.001f) ||
+            !BoundsContainsPoint(rest.max, target.localBounds, 0.001f))
+            Reject("TARGET_LOCAL_BOUNDS_INSUFFICIENT");
+        Matrix4x4 world = target.transform.localToWorldMatrix * delta;
+        Matrix4x4 local = target.transform.parent.worldToLocalMatrix * world;
+        Vector3 position = local.GetColumn(3);
+        if (!Finite(position) || !SameMatrix(local,
+            Matrix4x4.TRS(position, target.transform.localRotation, target.transform.localScale), 0.001f))
+            Reject("EDITED_REST_MISMATCH");
+        return position;
+    }
+
+    private static void ValidateTranslationScope(GameObject root, SkinnedMeshRenderer target)
+    {
+        if (target.transform == root.transform || target.transform.parent == null || target.transform.childCount != 0 ||
+            target.GetComponents<Renderer>().Length != 1)
+            Reject("EDITED_REST_MISMATCH");
+        foreach (Component component in root.GetComponentsInChildren<Component>(true))
+        {
+            if (component == null) Reject("SOURCE_COMPONENT_SCOPE_UNSUPPORTED");
+            if (component is Transform || component is VapbRealizationMarker || IsReviewedExportMarker(component)) continue;
+            if (component is Animator animator && animator.runtimeAnimatorController == null) continue;
+            if (component is SkinnedMeshRenderer skin)
+            {
+                if (skin.rootBone == target.transform || skin.probeAnchor == target.transform ||
+                    Array.IndexOf(skin.bones, target.transform) >= 0)
+                    Reject("EDITED_REST_MISMATCH");
+                continue;
+            }
+            if (TranslationPhysicsType(component))
+            {
+                ValidateTranslationPhysics(component, root.transform, target.transform);
+                continue;
+            }
+            // Includes Cloth, constraints and unreviewed consumers/drivers.
+            Reject("SOURCE_COMPONENT_SCOPE_UNSUPPORTED");
+        }
+    }
+
+    private static bool TranslationPhysicsType(Component component)
+    {
+        Type type = component.GetType();
+        if (type.Assembly.GetName().Name != "VRC.SDK3.Dynamics.PhysBone" ||
+            (type.FullName != "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone" &&
+             type.FullName != "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider")) return false;
+        MonoScript script = component is MonoBehaviour behaviour ? MonoScript.FromMonoBehaviour(behaviour) : null;
+        return script != null && script.GetClass() == type;
+    }
+
+    private static void ValidateTranslationPhysics(Component component, Transform root, Transform owner)
+    {
+        // SDK roots default to the component Transform. Refuse the entire possible
+        // driven subtree; do not attempt to reproduce SDK exclusion/pruning rules.
+        if (component.transform.IsChildOf(owner)) Reject("SOURCE_COMPONENT_SCOPE_UNSUPPORTED");
+        var serialized = new SerializedObject(component);
+        SerializedProperty rootProperty = serialized.FindProperty("rootTransform");
+        if (rootProperty == null || rootProperty.propertyType != SerializedPropertyType.ObjectReference ||
+            (rootProperty.objectReferenceValue == null && rootProperty.objectReferenceInstanceIDValue != 0))
+            Reject("SOURCE_COMPONENT_SCOPE_UNSUPPORTED");
+        Transform effectiveRoot = rootProperty.objectReferenceValue == null ? component.transform :
+            rootProperty.objectReferenceValue as Transform;
+        if (effectiveRoot == null || !effectiveRoot.IsChildOf(root) || effectiveRoot.IsChildOf(owner) ||
+            (component.GetType().FullName.EndsWith(".VRCPhysBone", StringComparison.Ordinal) && owner.IsChildOf(effectiveRoot)))
+            Reject("SOURCE_COMPONENT_SCOPE_UNSUPPORTED");
+        SerializedProperty property = serialized.GetIterator();
+        while (property.Next(true))
+        {
+            if (property.propertyType != SerializedPropertyType.ObjectReference) continue;
+            UnityEngine.Object value = property.objectReferenceValue;
+            if (value == null && property.objectReferenceInstanceIDValue != 0) Reject("SOURCE_COMPONENT_SCOPE_UNSUPPORTED");
+            Transform referenced = value is GameObject gameObject ? gameObject.transform :
+                value is Component referencedComponent ? referencedComponent.transform : null;
+            if (referenced != null && (!referenced.IsChildOf(root) || referenced.IsChildOf(owner)))
+                Reject("SOURCE_COMPONENT_SCOPE_UNSUPPORTED");
+            if (property.propertyPath.StartsWith("colliders.Array.data[", StringComparison.Ordinal) &&
+                (!(value is Component collider) || !TranslationPhysicsType(collider) ||
+                 collider.GetType().FullName != "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider"))
+                Reject("SOURCE_COMPONENT_SCOPE_UNSUPPORTED");
         }
     }
 
@@ -2676,6 +2798,11 @@ public static partial class VapbModelSkinFinalizer
                         bones[i].localScale = rest.scale;
                         PrefabUtility.RecordPrefabInstancePropertyModifications(bones[i]);
                     }
+                if (plan.edited.rendererLocalPosition.HasValue)
+                {
+                    target.transform.localPosition = plan.edited.rendererLocalPosition.Value;
+                    PrefabUtility.RecordPrefabInstancePropertyModifications(target.transform);
+                }
                 target.sharedMesh = plan.edited.mesh;
                 if (plan.task.kind == SourceKind)
                     for (int i = 0; i < plan.edited.mesh.blendShapeCount; i++)
@@ -2738,6 +2865,18 @@ public static partial class VapbModelSkinFinalizer
             Regex.IsMatch(mod.propertyPath, @"^m_Local(Position|Scale)\.[xyz]$|^m_LocalRotation\.[xyzw]$");
     }
 
+    private static Vector3? ManagedRendererPosition(List<PreparedTask> plans, Transform source)
+    {
+        Vector3? found = null;
+        foreach (PreparedTask plan in plans)
+            if (plan.target.transform == source && plan.edited.rendererLocalPosition.HasValue)
+            {
+                if (found.HasValue) Reject("VARIANT_AMBIGUOUS");
+                found = plan.edited.rendererLocalPosition;
+            }
+        return found;
+    }
+
     private static void VerifyVariant(GameObject variant, GameObject original,
         List<PreparedTask> plans)
     {
@@ -2767,7 +2906,10 @@ public static partial class VapbModelSkinFinalizer
                   mod.propertyPath.StartsWith("m_Materials.Array.data[", StringComparison.Ordinal))));
             bool rootDefault = PrefabUtility.IsDefaultOverride(mod) &&
                 (mod.target == original || mod.target == original.transform);
-            if (!skinBinding && !rootDefault && !SourceRestModification(plans, mod))
+            bool rendererPosition = mod.target is Transform owner &&
+                ManagedRendererPosition(plans, owner).HasValue && mod.objectReference == null &&
+                Regex.IsMatch(mod.propertyPath, @"^m_LocalPosition\.[xyz]$");
+            if (!skinBinding && !rootDefault && !SourceRestModification(plans, mod) && !rendererPosition)
                 Reject("VARIANT_MODIFICATION_UNKNOWN");
         }
         Transform[] sourceTransforms = original.GetComponentsInChildren<Transform>(true);
@@ -2781,9 +2923,10 @@ public static partial class VapbModelSkinFinalizer
             if ((transform.parent == null ? null : PrefabUtility.GetCorrespondingObjectFromSource(transform.parent)) != corresponding.parent)
                 Reject("VARIANT_TRANSFORM_CHANGED");
             SourceBoneRest authored = ManagedSourceRest(plans, corresponding);
+            Vector3? rendererPosition = ManagedRendererPosition(plans, corresponding);
             if (authored == null)
             {
-                if (transform.localPosition != corresponding.localPosition ||
+                if (transform.localPosition != (rendererPosition ?? corresponding.localPosition) ||
                     transform.localRotation != corresponding.localRotation || transform.localScale != corresponding.localScale)
                     Reject("VARIANT_TRANSFORM_CHANGED");
             }

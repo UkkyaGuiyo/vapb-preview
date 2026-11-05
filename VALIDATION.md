@@ -41,3 +41,20 @@ The private test assets and raw logs are not distributed. The repository contain
 ## Publication checks
 
 The selected source received independent source/privacy/license inspection and an independent adversarial audit. A missing complete MIT notice in five helper headers was corrected and independently rechecked. The independent initial Git history, all objects/references, approved GitHub noreply Author/Committer identity and ZIP contents/metadata were inspected. Final repository visibility and download verification are recorded by the delivery report; the existence of this document alone does not prove publication.
+
+## Next candidate (not yet published)
+
+Selected development commit: `c95a431110602a168f574b59954c006307712335`.
+Only Import Assistant and Model Skin Finalizer runtime sources changed relative
+to the published source. All addon Python and other helper bodies remain unchanged.
+The changes add bounded direct leaf-renderer translation restoration and Japanese
+feedback for refused Apply. The existing translation guards and limitations apply;
+this does not enable arbitrary Object/Bone frame edits or general SDK behavior.
+
+Development verification includes first-party counterexamples, independent technical
+review, a protected real clothing GUI Apply, unchanged sibling/bone/material state,
+and exact references/position after separate-process Unity2022.3.22f1 reopen.
+The real Apply remains PARTIAL because of an unavailable Shader. VRChat is untested.
+A new fixed-source ZIP and candidate-specific installation/representative-function
+checks and publication audits are pending. Prior snapshot results above do not
+establish those new gates.

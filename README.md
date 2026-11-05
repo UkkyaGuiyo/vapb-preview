@@ -2,6 +2,12 @@
 
 VAPB は、Unity の `.unitypackage` のうち対応するアセットを Blender に読み込み、Blender で編集した対応データを Unity へ戻すための実験的なアドオンです。この配布候補は開発プレビューです。すべての VRChat アバターや Unity 状態を往復できることを保証する正式リリースではありません。
 
+## 次の更新候補（未公開）
+
+選択したSkin MeshのObjectを平行移動してUnityへ戻す限定対応と、Unityの適用拒否後に原因・対処を表示する改善を準備しています。骨格が変わらず、移動対象が末端のRendererで、既存のbounds内に収まり、他Componentが対象を動かしていないことなどを確認できる場合だけ適用します。回転・拡縮・ShapeやActionとの組み合わせを一般対応するものではありません。
+
+この候補の新しいZIPは検証中です。以下の公開済みZIPにはこの変更を含みません。
+
 ## 開発版ZIPの入手
 
 [VAPB-alpha-b3f141d.zip をダウンロード](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-b3f141d.zip)

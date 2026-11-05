@@ -47,6 +47,7 @@ public sealed class VapbImportAssistant : EditorWindow
         public Func<string, Inspection> inspect;
         public Func<string, bool> apply;
         public Func<bool> partialResult;
+        public Func<string> failureReason;
     }
     [Serializable] private sealed class Manifest { public string schema_version; public Task[] reference_rebind_tasks; public string[] warnings; }
     [Serializable] private sealed class Task { public string kind; }
@@ -66,9 +67,11 @@ public sealed class VapbImportAssistant : EditorWindow
     private static string StatePath { get { return Path.Combine(Directory.GetParent(Application.dataPath).FullName,
         "Library", "VapbApplyAssistant.state"); } }
 
-    public static void Register(string kind, Func<string, Inspection> inspect, Func<string, bool> apply, Func<bool> partialResult = null)
+    public static void Register(string kind, Func<string, Inspection> inspect, Func<string, bool> apply,
+        Func<bool> partialResult = null, Func<string> failureReason = null)
     {
-        providers[kind] = new Provider { inspect = inspect, apply = apply, partialResult = partialResult };
+        providers[kind] = new Provider { inspect = inspect, apply = apply, partialResult = partialResult,
+            failureReason = failureReason };
         Schedule();
     }
     [InitializeOnLoadMethod]
@@ -243,6 +246,10 @@ public sealed class VapbImportAssistant : EditorWindow
     private static string Reason(string error)
     {
         if (error == null) return "";
+        if (error == "EDITED_REST_MISMATCH")
+            return "編集したMeshと元の骨格の基準位置を一致させられませんでした。\n" +
+                "Objectの位置・回転・拡大縮小や骨の基準姿勢を変えた場合は、変更前の保存コピーから確認してください。\n" +
+                "この組み合わせの復元は未対応のため、適用を停止しました。";
         if (error.Contains("HASH") || error.Contains("STALE") || error.Contains("REVISION"))
             return "原本または編集データの版が一致しません。対象のPackageを確認してください。";
         if (error.Contains("OCCUPIED") || error.Contains("ALREADY")) return "保存先が別の内容で使用されています。上書きは行いません。";
@@ -279,6 +286,7 @@ public sealed class VapbImportAssistant : EditorWindow
                 entry.error != null ? "適用不可" : view.partial ? "部分対応" : "適用可能（事前確認済み）", EditorStyles.boldLabel);
             if (entry.error != null)
             {
+                if (view != null) EditorGUILayout.LabelField("対象", view.target, EditorStyles.wordWrappedLabel);
                 EditorGUILayout.HelpBox(Reason(entry.error), MessageType.Error);
                 if (entry.missingScripts != null && entry.missingScripts.Length != 0)
                     EditorGUILayout.LabelField("不足しているScript参照", entry.missingScripts.Length + "件（参照IDは詳細に表示）");
@@ -341,12 +349,13 @@ public sealed class VapbImportAssistant : EditorWindow
         if (entries.Count == 0) Close();
         else Repaint();
     }
-    private static string ApplyResultMessage(bool applied, bool inspectionPartial, bool providerPartial)
+    private static string ApplyResultMessage(bool applied, bool inspectionPartial, bool providerPartial, string failureReason)
     {
         if (applied ? inspectionPartial : providerPartial)
             return "部分対応：Prefabを生成しました。未解決項目が残っています。確認画面の警告を確認してください。";
-        return applied ? "適用が完了しました。出力Prefabを開いて確認してください。" :
-            "適用できませんでした。Consoleの理由を確認してください。";
+        if (applied) return "適用が完了しました。出力Prefabを開いて確認してください。";
+        return String.IsNullOrEmpty(failureReason) ? "適用できませんでした。Consoleの理由を確認してください。" :
+            "適用できませんでした。\n" + Reason(failureReason);
     }
 
     private void ApplyEntry(Entry entry)
@@ -362,6 +371,8 @@ public sealed class VapbImportAssistant : EditorWindow
         }
         bool complete = fresh.provider.apply(fresh.path);
         bool partial = !complete && fresh.provider.partialResult != null && fresh.provider.partialResult();
+        if (!complete && !partial && fresh.provider.failureReason != null)
+            entry.error = fresh.provider.failureReason();
         if (complete || partial)
         {
             entry.applied = true;
@@ -375,6 +386,6 @@ public sealed class VapbImportAssistant : EditorWindow
             try { Remember(fresh, "applied"); } catch (Exception error) { Debug.LogWarning(error.GetType().Name); }
         }
         EditorUtility.DisplayDialog("VAPB：適用結果",
-            ApplyResultMessage(complete, fresh.inspection.partial, partial), "閉じる");
+            ApplyResultMessage(complete, fresh.inspection.partial, partial, entry.error), "閉じる");
     }
 }
