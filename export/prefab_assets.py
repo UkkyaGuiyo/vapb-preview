@@ -6,7 +6,34 @@ import hashlib
 import json
 import math
 import re
+from array import array
 from pathlib import Path
+
+
+def partial_export_message(member_name, path, manifest):
+    """Explain independent output issues without calling references missing files."""
+    missing = manifest["missing"]
+    message = f"{member_name}: 一部出力 ({path})。未解決項目 {len(missing)} 件。"
+    no_uv = sum(item.get("status") == "NO_UV_MAPS" for item in missing)
+    if no_uv:
+        message += (f" UVマップのないMesh {no_uv} 個のUV画像は出力していません。"
+                    "必要な場合はBlenderでUVマップを作成して再出力してください。")
+    unproven = sum(item.get("status") == "CURRENT_MATERIAL_SOURCE_UNPROVEN" for item in missing)
+    if unproven:
+        message += (f" 元Texture: 対応未確認のMaterialスロット {unproven} 件。"
+                    "素材ファイルの有無は未判定です。元Prefabとの対応を確認してください。")
+    unresolved_textures = sum(item.get("status") == "MISSING_OR_AMBIGUOUS_TEXTURE" for item in missing)
+    if unresolved_textures:
+        message += (f" 元Texture: 未解決の参照 {unresolved_textures} 件。"
+                    "素材Packageや参照先を確認し、再解決後に再出力してください。")
+    empty_png = sum(item.get("status") == "UV_PNG_EMPTY_WITH_SOURCE_CORNER" for item in missing)
+    if empty_png:
+        message += (f" UV座標があるのに透明なPNG {empty_png} 枚。"
+                    "微小なUVは画像に描画されない場合があります。保持したSVGで座標を確認してください。")
+    fbx = manifest["outputs"].get("fbx", {})
+    if fbx.get("status") == "FAILED":
+        message += f" FBXは未出力: {fbx['reason']}。"
+    return message + " 詳細は保存先のmanifest.jsonに記録しました。"
 
 
 def selected_member_objects(member, scene):
@@ -111,6 +138,20 @@ def _blender_uv_tiles(polygons):
     return tiles or {(0, 0)}
 
 
+def _png_has_visible_alpha(path, bpy):
+    """Inspect the generated file without reusing or changing a working Image."""
+    image = bpy.data.images.load(str(path), check_existing=False)
+    try:
+        width, height = image.size
+        if width <= 0 or height <= 0 or image.channels != 4:
+            raise RuntimeError("UV PNG could not be decoded as an RGBA image")
+        pixels = array("f", [0.0]) * (width * height * 4)
+        image.pixels.foreach_get(pixels)
+        return any(pixels[i] > 0 for i in range(3, len(pixels), 4))
+    finally:
+        bpy.data.images.remove(image)
+
+
 def write_uv_layout(context, obj, layer_index, directory: Path, stem: str, *, bpy_module=None):
     """Draw original UV coordinates with Blender's layout exporters."""
     if bpy_module is None:
@@ -182,7 +223,18 @@ def write_uv_layout(context, obj, layer_index, directory: Path, stem: str, *, bp
             tile_files.append({"tile": list(tile),
                                "png": stem + suffix + ".png",
                                "svg": stem + suffix + ".svg"})
-        return {"png": pngs, "svg": svgs, "tiles": tile_files,
+        interior_tiles = set()
+        for u, v in coords:
+            x, y = math.floor(u), math.floor(v)
+            if x < u < x + 1 and y < v < y + 1:
+                interior_tiles.add((x, y))
+        # This detects wholly empty rasters with source corners, not fidelity of
+        # individual islands or polygons crossing tiles without an interior corner.
+        issues = [{"status": "UV_PNG_EMPTY_WITH_SOURCE_CORNER",
+                   "tile": tile["tile"], "png": tile["png"]}
+                  for tile in tile_files if tuple(tile["tile"]) in interior_tiles
+                  and not _png_has_visible_alpha(directory / tile["png"], bpy_module)]
+        return {"png": pngs, "svg": svgs, "tiles": tile_files, "issues": issues,
                 "tile_mode": "UV" if needs_tiles else "NONE"}
     finally:
         if copy is not None:
@@ -401,11 +453,11 @@ def export_prefab_assets(context, member, destination, *, uv=True, textures=True
     import bpy
     parent = Path(destination).expanduser().resolve()
     if not parent.is_dir():
-        raise ValueError("Choose an existing destination folder")
+        raise ValueError("保存先フォルダーが見つかりません。作成するか、既存のフォルダーを選んでください。")
     objects = selected_member_objects(member, context.scene)
     meshes = [obj for obj in objects if obj.type == "MESH"]
     if not meshes:
-        raise ValueError("Prefab has no Mesh")
+        raise ValueError("選択したPrefabには出力対象のMeshがありません。Meshを含むPrefabを選び直してください。")
     target = parent / (_safe_stem(member.name) + "_assets")
     if target.exists():
         raise FileExistsError(f"output folder already exists: {target.name}")
@@ -468,6 +520,9 @@ def export_prefab_assets(context, member, destination, *, uv=True, textures=True
                                                     "status": "UV_EXPORT_UNSUPPORTED",
                                                     "reason": str(exc)})
                         continue
+                    for issue in files.pop("issues", []):
+                        manifest["missing"].append({**issue, "kind": "UV", "mesh": obj.name,
+                                                    "layer": layer.name, "png": "UV/" + issue["png"]})
                     files.update({"name": layer.name,
                                   "png": ["UV/" + name for name in files["png"]],
                                   "svg": ["UV/" + name for name in files["svg"]],
@@ -484,8 +539,8 @@ def export_prefab_assets(context, member, destination, *, uv=True, textures=True
         if fbx:
             folder = staging / "FBX"
             folder.mkdir()
+            fbx_path = folder / (_safe_stem(member.name) + ".fbx")
             try:
-                fbx_path = folder / (_safe_stem(member.name) + ".fbx")
                 slot_map = _export_fbx_with_slots(context, objects, fbx_path, bpy_module=bpy)
                 if not fbx_path.is_file() or fbx_path.stat().st_size == 0:
                     raise RuntimeError("FBX export reported success without a nonempty file")
@@ -494,6 +549,9 @@ def export_prefab_assets(context, member, destination, *, uv=True, textures=True
                                                 "material_slots": slot_map,
                                                 "limitations": ["Existing VAPB FBX preset; no Unity/VRC component serialization"]}
             except Exception as exc:
+                # Do not publish a file left incomplete by a failed writer.
+                # Failure to remove it aborts publication through outer cleanup.
+                fbx_path.unlink(missing_ok=True)
                 manifest["outputs"]["fbx"] = {"requested": True, "status": "FAILED", "reason": str(exc)}
                 manifest["missing"].append({"kind": "FBX", "status": "FBX_EXPORT_FAILED", "reason": str(exc)})
         manifest["status"] = "PARTIAL" if manifest["missing"] or manifest["outputs"]["fbx"].get("status") == "FAILED" else "COMPLETE"

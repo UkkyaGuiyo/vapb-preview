@@ -2,11 +2,17 @@
 
 VAPB は、Unity の `.unitypackage` のうち対応するアセットを Blender に読み込み、Blender で編集した対応データを Unity へ戻すための実験的なアドオンです。この配布候補は開発プレビューです。すべての VRChat アバターや Unity 状態を往復できることを保証する正式リリースではありません。
 
-## 今回の更新
+## このソースの更新内容
 
-選択したSkin MeshのObjectを平行移動してUnityへ戻す限定対応と、Unityの適用拒否後に原因・対処を表示する改善を収録しました。骨格が変わらず、移動対象が末端のRendererで、既存のbounds内に収まり、他Componentが対象を動かしていないことなどを確認できる場合だけ適用します。回転・拡縮・ShapeやActionとの組み合わせを一般対応するものではありません。
+- 素材Exportの部分成功を日本語で説明し、未解決のTexture参照と不足ファイル数を混同しないようにしました。
+- UV座標があるのにPNGが透明になる一部の条件を検出し、保持したSVGでの確認を案内します。すべてのUV Islandの描画精度を保証する検査ではありません。
+- FBX書き出し失敗時の不完全なファイルを出力結果から除き、UVと元Textureの独立出力を保ちます。
+- 非表示の補助Prefabだけを選択した場合に無関係な単一FBXを読み込む処理を、構造を確認できる限定条件で抑止しました。
+- Prefab詳細表示とMaterialスロット数を修正し、参照先Prefab内のMesh・Material依存関係を追跡します。Nested Prefabの編集対象を正確に復元できない場合の拒否は維持します。
 
-## 開発版ZIPの入手
+以下の旧ZIPの実GUI記録は旧版の検証です。このソースから作る新ZIPは別途検証し、結果と取得先を公開時に更新します。
+
+## 前回検証済みZIPの入手
 
 [VAPB-alpha-6317c05.zip をダウンロード](https://github.com/UkkyaGuiyo/vapb-preview/raw/refs/heads/preview/downloads/VAPB-alpha-6317c05.zip)
 
@@ -62,7 +68,7 @@ Unity 側では VAPB の確認画面で内容を確認し、明示的に適用�
 
 ## バージョンと検証記録
 
-アドオンの Blender 最小バージョン表示は 5.2.0、製品仕様は Blender 5.2.1 LTS を対象にしています。この固定ZIPは Blender 5.2.3 LTS で通常インストールと代表操作を確認しました。ZIP内READMEはビルド時点の記録で、検証後の結果はこのREADMEと検証記録に記載しています。これら以外の Blender バージョンは未検証です。Unity 側ヘルパーは Unity Editor API を使います。既存の限定的な記録には Unity 2022.3.22f1 が含まれますが、全 Unity バージョンや全プロジェクトでの互換性を示すものではありません。VRChat SDK と実行時互換性は未検証です。
+アドオンの Blender 最小バージョン表示は 5.2.0、製品仕様は Blender 5.2.1 LTS を対象にしています。前回公開ZIPは Blender 5.2.3 LTS で通常インストールと代表操作を確認しました。ZIP内READMEはビルド時点の記録で、検証後の結果はこのREADMEと検証記録に記載しています。これら以外の Blender バージョンは未検証です。Unity 側ヘルパーは Unity Editor API を使います。既存の限定的な記録には Unity 2022.3.22f1 が含まれますが、全 Unity バージョンや全プロジェクトでの互換性を示すものではありません。VRChat SDK と実行時互換性は未検証です。
 
 ## ライセンス
 
