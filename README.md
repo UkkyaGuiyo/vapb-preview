@@ -2,6 +2,16 @@
 
 VAPB は、Unity の `.unitypackage` のうち対応するアセットを Blender に読み込み、Blender で編集した対応データを Unity へ戻すための実験的なアドオンです。この配布候補は開発プレビューです。すべての VRChat アバターや Unity 状態を往復できることを保証する正式リリースではありません。
 
+## 支援 / Support
+
+### 日本語
+
+VAPBは無料のオープンソースとして開発しています。役に立った場合は、[GitHub Sponsors](https://github.com/sponsors/UkkyaGuiyo) から任意で開発を支援できます。支援は開発・検証環境の維持に使用します。支援の有無や金額によって、機能、個別サポート、開発優先順位が変わることはありません。
+
+### English
+
+VAPB is developed as free and open-source software. If VAPB is useful to you, you can optionally support development through [GitHub Sponsors](https://github.com/sponsors/UkkyaGuiyo). Sponsorship helps maintain the development and validation environment. Sponsorship status or amount does not grant feature access, individual support, or development priority.
+
 ## このソースの更新内容
 
 - 素材Exportの部分成功を日本語で説明し、未解決のTexture参照と不足ファイル数を混同しないようにしました。
